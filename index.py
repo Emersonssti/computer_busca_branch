@@ -1,19 +1,19 @@
+from __future__ import annotations
+
 import os
 import re
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from git import Repo
-from git.exc import GitCommandError
 
-
-def _caminho_git_no_repo(repo: Repo, arquivo_alvo: str) -> str:
+def _caminho_git_no_repo(root: str, arquivo_alvo: str) -> str:
     """Caminho relativo à raiz do repositório (formato que o Git espera)."""
     arquivo_alvo = arquivo_alvo.replace("\\", "/").strip()
-    root = repo.working_tree_dir
     if not root:
         return arquivo_alvo
     root_norm = os.path.normpath(root)
@@ -55,7 +55,59 @@ def _normaliza_mm_yyyy_digitado(s: str) -> str | None:
     return f"{mes}/{ano}"
 
 
-def _resolver_caminho_tracked_casefold(repo: Repo, caminho: str) -> str:
+def _git_run(repo_path: str, *args: str) -> str:
+    p = subprocess.run(
+        ["git", "-C", repo_path, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if p.returncode != 0:
+        msg = (p.stderr or p.stdout or "").strip() or f"git falhou (código {p.returncode})"
+        raise RuntimeError(msg)
+    return p.stdout
+
+
+def _fmt_git_date(dt: datetime) -> str:
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.isoformat(sep=" ", timespec="seconds")
+
+
+def _parse_git_commit_date(s: str) -> datetime:
+    s = s.strip()
+    if not s:
+        raise ValueError("data vazia")
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"data git não reconhecida: {s!r}")
+
+
+def _refs_remotas_origin(repo_path: str) -> set[str]:
+    try:
+        out = _git_run(
+            repo_path,
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/remotes/origin",
+        )
+    except RuntimeError:
+        return set()
+    names = {ln.strip() for ln in out.splitlines() if ln.strip()}
+    return {n for n in names if n.rsplit("/", 1)[-1] != "HEAD"}
+
+
+def _resolver_caminho_tracked_casefold(repo_path: str, caminho: str) -> str:
     """
     Resolve o caminho exatamente como está no índice Git, sem diferenciar maiúsculas/minúsculas.
     Aceita caminho relativo completo ou só o nome do arquivo (se for único no repo).
@@ -64,7 +116,7 @@ def _resolver_caminho_tracked_casefold(repo: Repo, caminho: str) -> str:
     if not caminho:
         raise ValueError("Caminho do arquivo vazio.")
 
-    tracked = [ln.strip() for ln in repo.git.ls_files().splitlines() if ln.strip()]
+    tracked = [ln.strip() for ln in _git_run(repo_path, "ls-files").splitlines() if ln.strip()]
     if caminho in tracked:
         return caminho
 
@@ -119,12 +171,18 @@ def _casar_ref_no_remoto(nomes_refs: set[str], pedido: str) -> str | None:
     return None
 
 
-def _ref_padrao_origin(repo: Repo) -> str | None:
+def _ref_padrao_origin(repo_path: str) -> str | None:
     """Branch padrão do clone (ex.: origin/integracao) via origin/HEAD."""
-    try:
-        out = repo.git.symbolic_ref("refs/remotes/origin/HEAD").strip()
-    except GitCommandError:
+    p = subprocess.run(
+        ["git", "-C", repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if p.returncode != 0:
         return None
+    out = p.stdout.strip()
     prefix = "refs/remotes/"
     if out.startswith(prefix):
         return out[len(prefix) :]
@@ -144,7 +202,7 @@ _FALLBACKS_INTEGRACAO = (
 
 
 def _resolver_refs_integracao_efetivas(
-    repo: Repo, nomes_refs_origin: set[str], texto: str
+    repo_path: str, nomes_refs_origin: set[str], texto: str
 ) -> list[str]:
     """
     Refs que existem no remoto, respeitando maiúsculas reais do repo.
@@ -160,7 +218,7 @@ def _resolver_refs_integracao_efetivas(
     if resultado:
         return resultado
 
-    padrao = _ref_padrao_origin(repo)
+    padrao = _ref_padrao_origin(repo_path)
     if padrao:
         casado = _casar_ref_no_remoto(nomes_refs_origin, padrao)
         if casado and casado.rsplit("/", 1)[-1] != "HEAD":
@@ -176,36 +234,98 @@ def _resolver_refs_integracao_efetivas(
 _LABEL_SEM_REF_INTEGRACAO = "Sem branch de integração no remoto"
 
 
-def _commit_ancestral_da_ref(repo: Repo, commit_sha: str, ref: str) -> bool:
+def _commit_ancestral_da_ref(repo_path: str, commit_sha: str, ref: str) -> bool:
     """True se commit_sha está no histórico que leva ao tip de ref (ex.: já integrado em produção)."""
-    try:
-        repo.git.merge_base("--is-ancestor", commit_sha, ref)
+    p = subprocess.run(
+        ["git", "-C", repo_path, "merge-base", "--is-ancestor", commit_sha, ref],
+        capture_output=True,
+    )
+    if p.returncode == 0:
         return True
-    except GitCommandError:
+    if p.returncode == 1:
         return False
+    return False
 
 
-def _data_entrada_commit_na_ref(repo: Repo, commit_sha: str, ref: str) -> str | None:
+def _commit_data_hora_fmt(repo_path: str, sha: str) -> str | None:
+    p = subprocess.run(
+        ["git", "-C", repo_path, "show", "-s", "--format=%cI", sha],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if p.returncode != 0 or not p.stdout.strip():
+        return None
+    try:
+        dt = _parse_git_commit_date(p.stdout.strip())
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return None
+
+
+def _data_entrada_commit_na_ref(repo_path: str, commit_sha: str, ref: str) -> str | None:
     """
     Data (commit) em que a alteração passou a integrar o histórico da ref:
     primeiro commit no caminho ancestry-path entre commit_sha e o tip de ref (ex.: merge),
     ou o próprio commit_sha se não houver commits intermediários.
     """
-    try:
-        out = repo.git.rev_list(
+    p = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo_path,
+            "rev-list",
             "--ancestry-path",
             f"{commit_sha}..{ref}",
             "--reverse",
             ref,
-        ).strip()
-    except GitCommandError:
-        out = ""
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    out = p.stdout.strip() if p.returncode == 0 else ""
     linhas = [ln.strip() for ln in out.splitlines() if ln.strip()]
     alvo_sha = linhas[0] if linhas else commit_sha
-    try:
-        return repo.commit(alvo_sha).committed_datetime.strftime("%Y-%m-%d %H:%M")
-    except Exception:
+    return _commit_data_hora_fmt(repo_path, alvo_sha)
+
+
+def _ultimo_commit_no_arquivo(
+    repo_path: str,
+    ref: str,
+    caminho: str,
+    *,
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[str, str, datetime] | None:
+    """Último commit em ref que toca caminho no intervalo, ou None."""
+    cmd = ["git", "-C", repo_path, "log", "-1", "--format=%H%n%an%n%cI"]
+    if since is not None:
+        cmd.append(f"--since={_fmt_git_date(since)}")
+    if until is not None:
+        cmd.append(f"--until={_fmt_git_date(until)}")
+    cmd.append(ref)
+    cmd.extend(["--", caminho])
+    p = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if p.returncode != 0 or not p.stdout.strip():
         return None
+    parts = p.stdout.strip().split("\n", 2)
+    if len(parts) < 3:
+        return None
+    sha, autor, raw_dt = parts[0], parts[1], parts[2]
+    try:
+        dt = _parse_git_commit_date(raw_dt)
+    except (ValueError, TypeError):
+        return None
+    return sha, autor, dt
 
 
 def parse_intervalo_mes_ano(inicio_mm_yyyy: str, fim_mm_yyyy: str) -> tuple[datetime, datetime]:
@@ -262,25 +382,27 @@ def buscar_branches_com_alteracao(
     if not os.path.exists(repo_path):
         raise FileNotFoundError("Caminho do repositório inválido.")
 
-    repo = Repo(repo_path)
-    caminho = _caminho_git_no_repo(repo, arquivo_alvo)
-    caminho = _resolver_caminho_tracked_casefold(repo, caminho)
+    caminho = _caminho_git_no_repo(repo_path, arquivo_alvo)
+    caminho = _resolver_caminho_tracked_casefold(repo_path, caminho)
     if progress_callback:
         progress_callback(f"Arquivo resolvido no repo: {caminho}")
 
-    if "origin" not in [r.name for r in repo.remotes]:
+    rem_out = [
+        ln.strip() for ln in _git_run(repo_path, "remote").splitlines() if ln.strip()
+    ]
+    if "origin" not in rem_out:
         raise RuntimeError("Nenhum remote 'origin' configurado.")
 
     if progress_callback:
         progress_callback("Atualizando referências remotas (fetch)...")
     try:
-        repo.remotes.origin.fetch()
-    except GitCommandError as e:
+        _git_run(repo_path, "fetch", "origin")
+    except RuntimeError as e:
         raise RuntimeError(f"Falha no fetch: {e}") from e
 
-    nomes_refs_origin = {r.name for r in repo.remotes.origin.refs}
+    nomes_refs_origin = _refs_remotas_origin(repo_path)
     refs_int_ok = _resolver_refs_integracao_efetivas(
-        repo, nomes_refs_origin, refs_integracao or ""
+        repo_path, nomes_refs_origin, refs_integracao or ""
     )
     if progress_callback:
         if not refs_int_ok:
@@ -290,32 +412,27 @@ def buscar_branches_com_alteracao(
         else:
             progress_callback(f"Comparando integração com: {', '.join(refs_int_ok)}")
 
-    kwargs = {"paths": caminho, "max_count": 1}
-    if since is not None:
-        kwargs["since"] = since
-    if until is not None:
-        kwargs["until"] = until
-
     branches_com_modificacao = []
-    refs = [r for r in repo.remotes.origin.refs if r.name.rsplit("/", 1)[-1] != "HEAD"]
+    refs = sorted(nomes_refs_origin)
     total = len(refs)
 
     for i, ref in enumerate(refs):
         if progress_callback:
             progress_callback(f"Analisando branches… {i + 1}/{total}")
 
-        commits = list(repo.iter_commits(ref.name, **kwargs))
-
-        if commits:
-            c = commits[0]
+        hit = _ultimo_commit_no_arquivo(
+            repo_path, ref, caminho, since=since, until=until
+        )
+        if hit:
+            sha, autor, dt = hit
             branches_com_modificacao.append(
                 {
-                    "branch": ref.name,
-                    "ultimo_commit": c.hexsha[:7],
-                    "data": c.committed_datetime.strftime("%Y-%m-%d %H:%M"),
-                    "autor": c.author.name,
-                    "_ts": c.committed_datetime,
-                    "_sha": c.hexsha,
+                    "branch": ref,
+                    "ultimo_commit": sha[:7],
+                    "data": dt.strftime("%Y-%m-%d %H:%M"),
+                    "autor": autor,
+                    "_ts": dt,
+                    "_sha": sha,
                 }
             )
 
@@ -333,14 +450,14 @@ def buscar_branches_com_alteracao(
         if refs_int_ok:
             ref_match = None
             for rref in refs_int_ok:
-                if _commit_ancestral_da_ref(repo, sha, rref):
+                if _commit_ancestral_da_ref(repo_path, sha, rref):
                     ref_match = rref
                     break
             if ref_match:
                 curto = ref_match.split("/", 1)[-1] if "/" in ref_match else ref_match
                 item["integracao"] = f"Sim ({curto})"
                 item["data_integracao"] = (
-                    _data_entrada_commit_na_ref(repo, sha, ref_match) or "—"
+                    _data_entrada_commit_na_ref(repo_path, sha, ref_match) or "—"
                 )
             else:
                 item["integracao"] = "Não"
@@ -402,14 +519,22 @@ ATALHOS
 • F1 — abre esta janela de ajuda.
 
 REQUISITOS NA MÁQUINA
-• Git no PATH.
+• Python 3.9 ou superior (biblioteca padrão; sem pacotes pip obrigatórios).
+• Git no PATH (o programa chama o executável `git` diretamente).
+• Tkinter disponível no Python usado para abrir a janela (no macOS com Homebrew: `brew install python-tk@3.13` se necessário).
 • Clone atualizado ou com rede para o fetch; credenciais são as já configuradas no seu ambiente
   (o executável não armazena usuário ou senha).
 """.strip()
 
 
+def _default_pasta_clone() -> str:
+    if sys.platform == "win32":
+        return r"C:\Users\Catalog Locação\Documents\ORACLE"
+    return os.path.join(os.path.expanduser("~"), "Documents")
+
+
 def _criar_app():
-    default_repo = r"C:\Users\Catalog Locação\Documents\ORACLE"
+    default_repo = _default_pasta_clone()
     _de_padrao, _ate_padrao = _mm_yyyy_exibicao_padrao_60_dias()
     _de_padrao_key = _normaliza_mm_yyyy_digitado(_de_padrao)
     _ate_padrao_key = _normaliza_mm_yyyy_digitado(_ate_padrao)

@@ -1,0 +1,2 @@
+# Projeto usa apenas biblioteca padrão do Python + o executável `git` no PATH.
+# (GitPython foi removido para evitar dependência de pip / pyexpat no macOS.)
