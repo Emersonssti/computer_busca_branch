@@ -1,0 +1,2 @@
+# Somente para gerar o .exe (ou equivalente) com PyInstaller.
+pyinstaller>=6.0

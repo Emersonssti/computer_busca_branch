@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import sys
 import threading
 import tkinter as tk
 from calendar import monthrange
@@ -528,8 +527,7 @@ REQUISITOS NA MÁQUINA
 
 
 def _default_pasta_clone() -> str:
-    if sys.platform == "win32":
-        return r"C:\Users\Catalog Locação\Documents\ORACLE"
+    """Pasta inicial no campo do clone (cada dev pode mudar com Procurar…)."""
     return os.path.join(os.path.expanduser("~"), "Documents")
 
 
