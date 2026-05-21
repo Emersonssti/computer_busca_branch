@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -39,6 +40,82 @@ def _kwargs_subprocess_sem_console() -> dict:
     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     si.wShowWindow = 0
     return {"startupinfo": si}
+
+
+_GIT_EXE_CACHE: str | None = None
+
+
+def _mensagem_git_nao_encontrado() -> str:
+    return (
+        "O Git não foi encontrado neste computador.\n\n"
+        "Este programa depende do Git for Windows (não vem embutido no .exe).\n\n"
+        "1. Baixe e instale: https://git-scm.com/download/win\n"
+        "2. Na instalação, mantenha a opção de adicionar o Git ao PATH\n"
+        "3. Feche e abra o Busca Branch Publicada novamente\n\n"
+        "Se o Git já estiver instalado, reinicie o Windows ou peça ao TI "
+        "para incluir a pasta Git\\cmd no PATH do sistema."
+    )
+
+
+def _candidatos_git_windows() -> list[Path]:
+    candidatos: list[Path] = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(var, "")
+        if base:
+            candidatos.append(Path(base) / "Git" / "cmd" / "git.exe")
+    candidatos.append(Path(r"C:\Program Files\Git\cmd\git.exe"))
+    return candidatos
+
+
+def _resolver_executavel_git() -> str | None:
+    """PATH do git.exe — .exe sem console costuma não herdar o PATH completo."""
+    global _GIT_EXE_CACHE
+    if _GIT_EXE_CACHE and Path(_GIT_EXE_CACHE).is_file():
+        return _GIT_EXE_CACHE
+
+    encontrado = shutil.which("git")
+    if encontrado and Path(encontrado).is_file():
+        _GIT_EXE_CACHE = os.path.normpath(encontrado)
+        return _GIT_EXE_CACHE
+
+    if sys.platform == "win32":
+        for caminho in _candidatos_git_windows():
+            if caminho.is_file():
+                _GIT_EXE_CACHE = os.path.normpath(str(caminho))
+                return _GIT_EXE_CACHE
+
+    return None
+
+
+def _preparar_ambiente_git() -> str:
+    """Garante git.exe e inclui Git\\cmd no PATH dos subprocessos."""
+    exe = _resolver_executavel_git()
+    if not exe:
+        raise FileNotFoundError(_mensagem_git_nao_encontrado())
+    pasta = str(Path(exe).parent)
+    path_atual = os.environ.get("PATH", "")
+    if pasta.lower() not in path_atual.lower():
+        os.environ["PATH"] = pasta + os.pathsep + path_atual
+    return exe
+
+
+def _montar_cmd_git(repo_path: str | None, *args: str) -> list[str]:
+    exe = _preparar_ambiente_git()
+    cmd = [exe]
+    if repo_path:
+        cmd.extend(["-C", repo_path])
+    cmd.extend(args)
+    return cmd
+
+
+def _erro_subprocess_git(exc: BaseException) -> RuntimeError:
+    if isinstance(exc, FileNotFoundError):
+        return RuntimeError(_mensagem_git_nao_encontrado())
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 2:
+        return RuntimeError(_mensagem_git_nao_encontrado())
+    if isinstance(exc, OSError) and exc.errno == 2:
+        return RuntimeError(_mensagem_git_nao_encontrado())
+    return RuntimeError(str(exc))
 
 
 def _caminho_git_no_repo(root: str, arquivo_alvo: str) -> str:
@@ -86,14 +163,17 @@ def _normaliza_mm_yyyy_digitado(s: str) -> str | None:
 
 
 def _git_run(repo_path: str, *args: str) -> str:
-    p = subprocess.run(
-        ["git", "-C", repo_path, *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_kwargs_subprocess_sem_console(),
-    )
+    try:
+        p = subprocess.run(
+            _montar_cmd_git(repo_path, *args),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
     if p.returncode != 0:
         msg = (p.stderr or p.stdout or "").strip() or f"git falhou (código {p.returncode})"
         raise RuntimeError(msg)
@@ -204,14 +284,17 @@ def _casar_ref_no_remoto(nomes_refs: set[str], pedido: str) -> str | None:
 
 def _ref_padrao_origin(repo_path: str) -> str | None:
     """Branch padrão do clone (ex.: origin/integracao) via origin/HEAD."""
-    p = subprocess.run(
-        ["git", "-C", repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_kwargs_subprocess_sem_console(),
-    )
+    try:
+        p = subprocess.run(
+            _montar_cmd_git(repo_path, "symbolic-ref", "refs/remotes/origin/HEAD"),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
     if p.returncode != 0:
         return None
     out = p.stdout.strip()
@@ -268,11 +351,14 @@ _LABEL_SEM_REF_INTEGRACAO = "Sem branch de integração no remoto"
 
 def _commit_ancestral_da_ref(repo_path: str, commit_sha: str, ref: str) -> bool:
     """True se commit_sha está no histórico que leva ao tip de ref (ex.: já integrado em produção)."""
-    p = subprocess.run(
-        ["git", "-C", repo_path, "merge-base", "--is-ancestor", commit_sha, ref],
-        capture_output=True,
-        **_kwargs_subprocess_sem_console(),
-    )
+    try:
+        p = subprocess.run(
+            _montar_cmd_git(repo_path, "merge-base", "--is-ancestor", commit_sha, ref),
+            capture_output=True,
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
     if p.returncode == 0:
         return True
     if p.returncode == 1:
@@ -281,14 +367,17 @@ def _commit_ancestral_da_ref(repo_path: str, commit_sha: str, ref: str) -> bool:
 
 
 def _commit_data_hora_fmt(repo_path: str, sha: str) -> str | None:
-    p = subprocess.run(
-        ["git", "-C", repo_path, "show", "-s", "--format=%cI", sha],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_kwargs_subprocess_sem_console(),
-    )
+    try:
+        p = subprocess.run(
+            _montar_cmd_git(repo_path, "show", "-s", "--format=%cI", sha),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
     if p.returncode != 0 or not p.stdout.strip():
         return None
     try:
@@ -304,23 +393,24 @@ def _data_entrada_commit_na_ref(repo_path: str, commit_sha: str, ref: str) -> st
     primeiro commit no caminho ancestry-path entre commit_sha e o tip de ref (ex.: merge),
     ou o próprio commit_sha se não houver commits intermediários.
     """
-    p = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo_path,
-            "rev-list",
-            "--ancestry-path",
-            f"{commit_sha}..{ref}",
-            "--reverse",
-            ref,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_kwargs_subprocess_sem_console(),
-    )
+    try:
+        p = subprocess.run(
+            _montar_cmd_git(
+                repo_path,
+                "rev-list",
+                "--ancestry-path",
+                f"{commit_sha}..{ref}",
+                "--reverse",
+                ref,
+            ),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
     out = p.stdout.strip() if p.returncode == 0 else ""
     linhas = [ln.strip() for ln in out.splitlines() if ln.strip()]
     alvo_sha = linhas[0] if linhas else commit_sha
@@ -336,21 +426,24 @@ def _ultimo_commit_no_arquivo(
     until: datetime | None,
 ) -> tuple[str, str, datetime] | None:
     """Último commit em ref que toca caminho no intervalo, ou None."""
-    cmd = ["git", "-C", repo_path, "log", "-1", "--format=%H%n%an%n%cI"]
+    args_log = ["log", "-1", "--format=%H%n%an%n%cI"]
     if since is not None:
-        cmd.append(f"--since={_fmt_git_date(since)}")
+        args_log.append(f"--since={_fmt_git_date(since)}")
     if until is not None:
-        cmd.append(f"--until={_fmt_git_date(until)}")
-    cmd.append(ref)
-    cmd.extend(["--", caminho])
-    p = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_kwargs_subprocess_sem_console(),
-    )
+        args_log.append(f"--until={_fmt_git_date(until)}")
+    args_log.append(ref)
+    args_log.extend(["--", caminho])
+    try:
+        p = subprocess.run(
+            _montar_cmd_git(repo_path, *args_log),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
     if p.returncode != 0 or not p.stdout.strip():
         return None
     parts = p.stdout.strip().split("\n", 2)
@@ -652,22 +745,22 @@ def _classificar_erro_git(msg: str) -> str:
 
 
 def _git_comando(repo_path: str | None, *args: str, timeout: int = _GIT_TIMEOUT_REDE) -> subprocess.CompletedProcess:
-    cmd = ["git"]
-    if repo_path:
-        cmd.extend(["-C", repo_path])
-    cmd.extend(args)
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "1"
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        env=env,
-        **_kwargs_subprocess_sem_console(),
-    )
+    try:
+        _preparar_ambiente_git()
+        return subprocess.run(
+            _montar_cmd_git(repo_path, *args),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=env,
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
 
 
 def _testar_conexao_remota(repo_path: str) -> tuple[str, str]:
@@ -951,14 +1044,17 @@ def _obter_diff_commit_arquivo(repo_path: str, sha_ref: str, arquivo_alvo: str) 
         "--format=commit %H (%h)%nAutor: %an <%ae>%nData: %ci%nBranch/ref: %D",
         sha,
     ).strip()
-    p = subprocess.run(
-        ["git", "-C", repo_path, "show", "--no-color", sha, "--", caminho],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_kwargs_subprocess_sem_console(),
-    )
+    try:
+        p = subprocess.run(
+            _montar_cmd_git(repo_path, "show", "--no-color", sha, "--", caminho),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_kwargs_subprocess_sem_console(),
+        )
+    except (FileNotFoundError, OSError) as e:
+        raise _erro_subprocess_git(e) from e
     if p.returncode != 0:
         msg = (p.stderr or p.stdout or "").strip() or f"git show falhou (código {p.returncode})"
         raise RuntimeError(msg)
@@ -1305,6 +1401,14 @@ _AJUDA_ABAS: list[tuple[str, list[dict]]] = [
     (
         "Problemas comuns",
         [
+            {
+                "titulo": "Erro “não pode encontrar o arquivo” ao buscar",
+                "itens": [
+                    "Quase sempre significa que o Git for Windows não está instalado (ou o .exe não achou o git.exe).",
+                    "Instale de https://git-scm.com/download/win com opção padrão “Git from the command line”.",
+                    "Reabra o programa após instalar. Se o Git já existir, reinicie o PC ou peça ao TI.",
+                ],
+            },
             {
                 "titulo": "O programa não abre",
                 "itens": [
@@ -1839,6 +1943,17 @@ def _criar_app():
         threading.Thread(target=worker_login, daemon=True).start()
 
     def verificar_git_ao_abrir():
+        try:
+            _preparar_ambiente_git()
+        except FileNotFoundError:
+            status_var.set("Git não encontrado — instale o Git for Windows.")
+            messagebox.showerror(
+                _APP_TITLE,
+                _mensagem_git_nao_encontrado(),
+                parent=root,
+            )
+            return
+
         path = repo_var.get().strip()
         if not path or not os.path.isdir(path):
             status_var.set("Informe a pasta do clone do repositório.")
