@@ -1,2 +1,3 @@
-# Somente para gerar o .exe (ou equivalente) com PyInstaller.
+# Build do .exe (Windows) — inclui dependências de runtime
+-r requirements.txt
 pyinstaller>=6.0

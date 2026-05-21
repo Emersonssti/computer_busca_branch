@@ -1,54 +1,97 @@
-# Busca Branch Git (Computer)
+# Busca Branch Publicada — v4 (Computer Intelligence)
 
-Aplicativo em **Python + Tkinter** que consulta o remoto `origin`, faz `fetch` e lista branches em que um arquivo foi alterado no período, com indicação de integração.
+Aplicativo desktop para consultar branches remotas (`origin`) em que um arquivo foi alterado em um período, verificar integração e inspecionar o diff do commit. Versão **v4**.
 
-## Requisitos em qualquer máquina
+## Usuário final (executável)
 
-- **Python 3.9+** com **Tkinter** (no instalador oficial do Windows, mantenha *tcl/tk and IDLE* marcado).
-- **Git** no PATH ([Git for Windows](https://git-scm.com/download/win) no Windows).
-- **Não** é necessário `pip install` para rodar o programa (só usa a biblioteca padrão + o executável `git`).
+Distribua **`dist\BuscaBranchGit_v4.exe`**. Quem usa o programa **não precisa** de Python, pip nem acesso a este repositório.
 
-## Clonar e executar (Windows)
+### Requisitos na máquina do usuário
+
+| Item | Obrigatório |
+|------|-------------|
+| Windows | Sim |
+| **Git for Windows** ([download](https://git-scm.com/download/win)) | Sim — o `.exe` **não** embute o Git |
+| Clone local do repositório analisado (ex.: ORACLE) | Sim |
+| Rede / login | Só se marcar *Atualizar remoto (fetch)* no app |
+
+### Como o usuário executa
+
+1. Duplo clique em `BuscaBranchGit_v4.exe`.
+2. Na abertura o programa **restaura a última pasta do clone** e **verifica login Git** (pergunta se deve abrir a janela Microsoft/Azure quando necessário).
+3. **Pasta do clone** → raiz do repositório (Procurar…); fica salva para a próxima execução.
+3. **Arquivo** → caminho do arquivo no projeto (ex.: `procedures/arquivo.sql`).
+4. Deixar **Atualizar remoto (fetch)** desmarcado no dia a dia (evita login).
+5. **Executar busca** → duplo clique na linha para ver alterações (diff).
+6. **F1** — ajuda completa dentro do programa (linguagem para usuário leigo).
+
+### Login Microsoft (Azure DevOps)
+
+Se o `origin` for `dev.azure.com`, o fetch pode pedir conta **Microsoft corporativa** (não GitHub/Google). Login uma vez; depois o Windows costuma reutilizar a credencial.
+
+---
+
+## Desenvolvimento
+
+### Stack
+
+- Python 3.9+ · Tkinter · Git CLI
+- Runtime: `openpyxl`, `Pillow` (`requirements.txt`)
+- Build: PyInstaller 6+ (`requirements-build.txt`)
+
+### Executar em modo desenvolvimento
 
 ```bat
 git clone <url-do-repositorio>
 cd computer_busca_branch
+pip install -r requirements.txt
 python index.py
 ```
 
-Ou use o interpretador que preferir, desde que seja o mesmo que tem Tkinter.
+### Gerar executável v4 (Windows)
 
-## Clonar e executar (macOS)
-
-```bash
-git clone <url-do-repositorio>
+```bat
 cd computer_busca_branch
-./run_macos.sh
+python -m pip install --upgrade pip
+python -m pip install -r requirements-build.txt
+python -m PyInstaller BuscaBranchGit_v4.spec --noconfirm
 ```
 
-Se o Tk acusar incompatibilidade de versão do sistema, instale Python/Tk pelo Homebrew conforme a mensagem do script.
+Saída: **`dist\BuscaBranchGit_v4.exe`** (janela sem console). Inclui `logo.jpeg`, openpyxl e Pillow.
 
-## Gerar executável (.exe) no Windows
+Build limpo (opcional):
 
-1. Instale Python 3.9+ e Git (como acima).
-2. Na pasta do projeto:
+```bat
+rmdir /s /q build dist 2>nul
+python -m PyInstaller BuscaBranchGit_v4.spec --noconfirm
+```
 
-   ```bat
-   build_windows.bat
-   ```
+### Estrutura principal
 
-   Ou manualmente:
+| Arquivo | Função |
+|---------|--------|
+| `index.py` | UI, busca Git, diff, Excel, ajuda |
+| `BuscaBranchGit_v4.spec` | Empacotamento PyInstaller |
+| `logo.jpeg` | Logo Computer Intelligence (obrigatório no build) |
 
-   ```bat
-   python -m pip install -r requirements-build.txt
-   python -m PyInstaller BuscaBranchGit_v3.spec
-   ```
+Configuração do usuário: `%APPDATA%\BuscaBranchPublicada\settings.json` (`ultima_pasta_clone`, credencial já validada por repositório)
 
-3. O arquivo gerado fica em **`dist\BuscaBranchGit_v3.exe`** (modo janela, sem console).
+### Funcionalidades v4
 
-No **macOS/Linux** também é possível rodar o PyInstaller com o mesmo `.spec`, mas o hábito do projeto é empacotar o `.exe` no Windows.
+- Interface com logo e tema Computer Intelligence
+- Busca por período (60 dias padrão ou meses mm/aaaa)
+- Colunas de integração (`integracao`, etc.)
+- Diff do commit em janela interna (duplo clique / Ver alterações)
+- Exportação Excel
+- Fetch opcional (evita login repetido)
+- Ajuda em abas (F1) voltada ao uso do `.exe`
 
-## Notas
+### Notas técnicas
 
-- O usuário final do `.exe` precisa ter **Git instalado** no PATH; o PyInstaller **não** embute o Git.
-- Campos de pasta/arquivo na interface usam caminhos locais do clone; o padrão da pasta é `Documents` do usuário logado.
+- PyInstaller não embute o executável `git`.
+- Caminho padrão sugerido na UI: `Documents` do usuário.
+- Repositórios Azure DevOps: autenticação via Git Credential Manager.
+
+---
+
+**Computer Intelligence** — Busca Branch Publicada v4
