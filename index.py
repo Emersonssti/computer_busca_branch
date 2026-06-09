@@ -321,7 +321,7 @@ def _resolver_refs_integracao_efetivas(
 ) -> list[str]:
     """
     Refs que existem no remoto, respeitando maiúsculas reais do repo.
-    Se o campo vier vazio ou nada casar, usa origin/HEAD e nomes comuns (integracao, main…).
+    Se o campo viera vazio ou nada casar, usa origin/HEAD e nomes comuns (integracao, main…).
     """
     resultado: list[str] = []
     vistos: set[str] = set()
@@ -367,9 +367,10 @@ def _commit_ancestral_da_ref(repo_path: str, commit_sha: str, ref: str) -> bool:
 
 
 def _commit_data_hora_fmt(repo_path: str, sha: str) -> str | None:
+    """Puxa a data do autor do commit para manter o padrão intuitivo."""
     try:
         p = subprocess.run(
-            _montar_cmd_git(repo_path, "show", "-s", "--format=%cI", sha),
+            _montar_cmd_git(repo_path, "show", "-s", "--format=%aI", sha),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -389,9 +390,8 @@ def _commit_data_hora_fmt(repo_path: str, sha: str) -> str | None:
 
 def _data_entrada_commit_na_ref(repo_path: str, commit_sha: str, ref: str) -> str | None:
     """
-    Data (commit) em que a alteração passou a integrar o histórico da ref:
-    primeiro commit no caminho ancestry-path entre commit_sha e o tip de ref (ex.: merge),
-    ou o próprio commit_sha se não houver commits intermediários.
+    Data em que a alteração passou a integrar o histórico da ref.
+    Pega o primeiro Merge Commit ou o commit original se não houver intermediários.
     """
     try:
         p = subprocess.run(
@@ -401,7 +401,6 @@ def _data_entrada_commit_na_ref(repo_path: str, commit_sha: str, ref: str) -> st
                 "--ancestry-path",
                 f"{commit_sha}..{ref}",
                 "--reverse",
-                ref,
             ),
             capture_output=True,
             text=True,
@@ -425,8 +424,11 @@ def _ultimo_commit_no_arquivo(
     since: datetime | None,
     until: datetime | None,
 ) -> tuple[str, str, datetime] | None:
-    """Último commit em ref que toca caminho no intervalo, ou None."""
-    args_log = ["log", "-1", "--format=%H%n%an%n%cI"]
+    """
+    Último commit em ref que toca caminho no intervalo.
+    CORREÇÃO: Alterado de %cI para %aI para capturar a data real do Autor.
+    """
+    args_log = ["log", "-1", "--format=%H%n%an%n%aI"]
     if since is not None:
         args_log.append(f"--since={_fmt_git_date(since)}")
     if until is not None:
@@ -458,13 +460,7 @@ def _ultimo_commit_no_arquivo(
 
 
 def parse_intervalo_mes_ano(inicio_mm_yyyy: str, fim_mm_yyyy: str) -> tuple[datetime, datetime]:
-    """
-    Interpreta mm/aaaa (intervalo inclusivo nos meses escolhidos).
-
-    Retorna (since, until) para o Git: since = 1º dia do mês inicial 00:00;
-    until = instante exclusivo = 1º dia do mês *seguinte* ao mês final 00:00
-    (o Git usa --until como limite não inclusivo).
-    """
+    """Interpreta mm/aaaa (intervalo inclusivo nos meses escolhidos)."""
     pat = re.compile(r"^\s*(\d{1,2})/(\d{4})\s*$")
 
     def um(s: str) -> tuple[int, int]:
@@ -483,7 +479,6 @@ def parse_intervalo_mes_ano(inicio_mm_yyyy: str, fim_mm_yyyy: str) -> tuple[date
         until_exclusivo = datetime(yf + 1, 1, 1, 0, 0, 0)
     else:
         until_exclusivo = datetime(yf, mf + 1, 1, 0, 0, 0)
-    # Compara com o último momento do mês final (só para validar ordem)
     ultimo_dia = monthrange(yf, mf)[1]
     fim_inclusivo_visual = datetime(yf, mf, ultimo_dia, 23, 59, 59)
     if inicio > fim_inclusivo_visual:
@@ -501,14 +496,7 @@ def buscar_branches_com_alteracao(
     fazer_fetch: bool = True,
     progress_callback=None,
 ) -> list:
-    """
-    Branches em origin com pelo menos um commit que toca o arquivo.
-    Se since/until forem informados, só commits nesse intervalo
-    (since inclusivo; until = primeiro instante após o período, como o Git espera).
-
-    refs_integracao: refs separadas por vírgula; o commit listado é considerado integrado
-    se for ancestral do tip de alguma dessas refs (git merge-base --is-ancestor).
-    """
+    """Branches em origin com pelo menos um commit que toca o arquivo."""
     if not os.path.exists(repo_path):
         raise FileNotFoundError("Caminho do repositório inválido.")
 
@@ -764,10 +752,7 @@ def _git_comando(repo_path: str | None, *args: str, timeout: int = _GIT_TIMEOUT_
 
 
 def _testar_conexao_remota(repo_path: str) -> tuple[str, str]:
-    """
-    Verifica acesso ao origin.
-    Retorna: ok | rede | auth | sem_origin | invalido, mensagem.
-    """
+    """Verifica acesso ao origin."""
     path = repo_path.strip()
     if not path or not os.path.isdir(path):
         return "invalido", "Pasta do clone inválida ou inexistente."
@@ -1041,7 +1026,7 @@ def _obter_diff_commit_arquivo(repo_path: str, sha_ref: str, arquivo_alvo: str) 
         repo_path,
         "show",
         "-s",
-        "--format=commit %H (%h)%nAutor: %an <%ae>%nData: %ci%nBranch/ref: %D",
+        "--format=commit %H (%h)%nAutor: %an <%ae>%nData: %ai%nBranch/ref: %D",
         sha,
     ).strip()
     try:
